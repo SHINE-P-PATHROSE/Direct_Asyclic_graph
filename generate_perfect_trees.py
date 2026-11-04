@@ -12,6 +12,7 @@ Generates ultra-high resolution (300 DPI), zero-overlap, perfectly detailed diag
 ========================================================================================
 """
 
+import html
 import os
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -899,6 +900,87 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
     return content
 
 
+def generate_interactive_html(nodes, adj, in_degree):
+    """Generate a standalone, searchable HTML view of all DAG nodes and edges."""
+    parents = {node_id: [] for node_id in nodes}
+    for parent_id, children in adj.items():
+        for child_id in children:
+            parents[child_id].append(parent_id)
+
+    tree_nodes = []
+    for node_id, node in nodes.items():
+        node_id_text = html.escape(str(node_id), quote=True)
+        name = html.escape(str(node["name"]))
+        node_type = html.escape(str(node["type"]))
+        priority = html.escape(str(node.get("priority", "")))
+        duration = html.escape(str(node.get("time", 0)))
+        parent_ids = ", ".join(map(str, sorted(parents[node_id]))) or "None (root)"
+        child_ids = ", ".join(map(str, sorted(adj.get(node_id, ())))) or "None"
+        detail_id = f"node-details-{node_id_text}"
+        tree_nodes.append(
+            f'<li class="node-row"><button class="node" type="button" '
+            f'data-id="{node_id_text}" aria-expanded="false" '
+            f'aria-controls="{detail_id}">[{node_id_text}] {name} '
+            f'<span class="node-type">{node_type}</span></button>'
+            f'<p class="details" id="{detail_id}" hidden>'
+            f'Parents: {html.escape(parent_ids)} · Children: {html.escape(child_ids)}'
+            f' · Priority: {priority} · Duration: {duration} ms</p></li>'
+        )
+
+    content = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAG dependency tree</title>
+<style>
+body {{ color: #172033; font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 56rem; padding: 0 1rem; }}
+h1 {{ margin-bottom: .25rem; }}
+.summary {{ color: #526078; margin-top: 0; }}
+input {{ box-sizing: border-box; font: inherit; margin: 1rem 0; max-width: 32rem; padding: .6rem; width: 100%; }}
+ul {{ list-style: none; padding: 0; }}
+.node-row {{ border-bottom: 1px solid #dce2eb; padding: .7rem 0; }}
+.node {{ background: #f3f7fc; border: 1px solid #b8c7db; border-radius: .4rem; color: inherit; cursor: pointer; font: inherit; padding: .55rem .75rem; text-align: left; width: 100%; }}
+.node:hover, .node[aria-expanded="true"] {{ background: #e2efff; }}
+.node-type {{ color: #526078; font-size: .9em; }}
+.details {{ color: #39465d; margin: .5rem .75rem 0; }}
+</style>
+</head>
+<body>
+<main>
+<h1>DAG dependency tree</h1>
+<p class="summary">{len(nodes)} messages · {sum(in_degree.values())} dependency edges. Select a message to view its dependencies.</p>
+<label for="node-filter">Filter messages</label>
+<input id="node-filter" type="search" placeholder="Search by ID, name, or type">
+<ul id="nodes">
+{''.join(tree_nodes)}
+</ul>
+</main>
+<script>
+const rows = [...document.querySelectorAll(".node-row")];
+document.querySelector("#node-filter").addEventListener("input", (event) => {{
+  const query = event.target.value.trim().toLowerCase();
+  for (const row of rows) {{
+    row.hidden = !row.querySelector(".node").textContent.toLowerCase().includes(query);
+  }}
+}});
+for (const button of document.querySelectorAll(".node")) {{
+  button.addEventListener("click", () => {{
+    const expanded = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!expanded));
+    document.getElementById(button.getAttribute("aria-controls")).hidden = expanded;
+  }});
+}}
+</script>
+</body>
+</html>
+"""
+    with open("dag_tree_view.html", "w", encoding="utf-8") as file:
+        file.write(content)
+    print(f" -> Saved interactive tree for {len(nodes)} messages to 'dag_tree_view.html'")
+    return content
+
+
 def generate_tree_excel(nodes, adj, in_edges, in_degree):
     """Generate a multi-sheet workbook for the serial 8 ms cycle schedule."""
 
@@ -1092,7 +1174,10 @@ def main():
     # 6. Text Tree
     generate_text_tree(nodes, adj, in_edges, in_degree)
 
-    # 7. Excel DAG Tree & Multi-Cycle Schedule
+    # 7. Interactive HTML tree
+    generate_interactive_html(nodes, adj, in_degree)
+
+    # 8. Excel DAG Tree & Multi-Cycle Schedule
     generate_tree_excel(nodes, adj, in_edges, in_degree)
 
     print("=" * 80)
