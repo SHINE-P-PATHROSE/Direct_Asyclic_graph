@@ -14,7 +14,7 @@ def generate_visualizations(dag=None):
     import generate_schedule_timeline
     import generate_schedule_tree
 
-    print("\n[1/3] Generating subsystem diagrams, text/Excel schedules, and HTML tree...")
+    print("\n[1/3] Generating subsystem diagrams, text/Excel schedules, and trees...")
     generate_perfect_trees.main()
 
     print("\n[2/3] Generating the complete scheduled dependency graph...")
@@ -68,19 +68,25 @@ def main():
             result = "REACHABLE" if reach[parent_id][child_id] else "NOT REACHABLE"
             print(f"  {parent_id:02d} -> {child_id:02d}: {result}")
 
-    scheduled_order, timeline = dag.priority_aware_task_schedule()
-    total_duration = timeline[-1]["end_time"] if timeline else 0.0
+    scheduled_order, timeline = dag.priority_aware_task_schedule(
+        cycle_duration=8.0,
+        horizon_cycles=64,
+        max_tasks_per_cycle=20,
+    )
+    total_duration = sum(item["cycletime"] for item in timeline)
     print("\n" + "-" * 50)
     print("PRACTICAL APPLICATION: SERIAL PRIORITY-AWARE BUS SCHEDULE")
     print("-" * 50)
-    print("One task runs at a time; ready tasks are chosen by priority, duration, then ID.")
-    print(f"Scheduled tasks: {len(scheduled_order)}")
-    print(f"Serial execution estimate: {total_duration:.3f} ms")
-    print(f"{'Seq':<4} | {'ID':<3} | {'Message Name':<22} | {'Prio':<5} | {'Time (ms)':<9} | {'Start (ms)':<10} | {'End (ms)':<10}")
+    print("One task runs at a time; sampling intervals and dependencies are respected.")
+    print("Schedule horizon: 64 cycles | Cycle duration: 8 ms | Maximum 20 tasks per cycle.")
+    print(f"Scheduled executions: {len(scheduled_order)}")
+    print(f"Total bus execution time within the frame: {total_duration:.3f} ms")
+    print(f"{'Seq':<4} | {'Cycle':<5} | {'ID':<3} | {'Run':<4} | {'Message Name':<22} | {'Prio':<5} | {'Time (ms)':<9} | {'Start (ms)':<10} | {'End (ms)':<10}")
     print("-" * 75)
     for index, item in enumerate(timeline[:10], 1):
         print(
-            f"{index:<4} | {item['sl_no']:<3} | {item['name']:<22} | "
+            f"{index:<4} | {item['cycle']:<5} | {item['sl_no']:<3} | "
+            f"{item['occurrence']:<4} | {item['name']:<22} | "
             f"{item['priority']:<5} | {item['cycletime']:<9.3f} | "
             f"{item['start_time']:<10.3f} | {item['end_time']:<10.3f}"
         )

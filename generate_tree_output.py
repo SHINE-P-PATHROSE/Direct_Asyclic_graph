@@ -552,6 +552,9 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
     schedule_by_id, schedule_ordered_list, cycle_summaries = compute_priority_schedule(
         nodes, adj, in_edges, in_degree, TOTAL_CYCLE_TIME
     )
+    occurrence_counts = {}
+    for item in schedule_ordered_list:
+        occurrence_counts[item["id"]] = occurrence_counts.get(item["id"], 0) + 1
 
     tree_lines = []
     tree_lines.append("=" * 116)
@@ -576,7 +579,8 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
         node_str = (
             f"[{u:02d}] {n['name']} "
             f"({n['type']}, "
-            f"Cycle {sch['cycle']} [{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
+            f"{occurrence_counts[u]} executions per frame, first in Cycle {sch['cycle']} "
+            f"[{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
             f"Margin Left: {sch['time_left']:.3f} ms, "
             f"Prio {n['priority']})"
         )
@@ -598,7 +602,8 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
                     next_prefix
                     + ("\\-- " if child_is_last else "|-- ")
                     + f"[{child:02d}] {nodes[child]['name']} "
-                    + f"[DAG Convergence Link; scheduled in Cycle {c_sch['cycle']} at {c_sch['start_time']:.3f}-{c_sch['end_time']:.3f} ms]"
+                    + f"[DAG Convergence Link; {occurrence_counts[child]} executions per frame, "
+                    + f"first in Cycle {c_sch['cycle']}]"
                 )
             else:
                 build_tree_text(
@@ -629,7 +634,8 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
         tree_lines.append(
             f"  * [{nid:02d}] {n['name']} "
             f"({n['type']}, "
-            f"Cycle {sch['cycle']} [{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
+            f"{occurrence_counts[nid]} executions per frame, first in Cycle {sch['cycle']} "
+            f"[{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
             f"Margin Left: {sch['time_left']:.3f} ms, "
             f"Prio {n['priority']})"
         )
@@ -647,8 +653,8 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
     total_exec = sum(cs['used_time'] for cs in cycle_summaries)
     tree_lines.append("-" * 116)
     tree_lines.append(
-        f"Total Messages: {len(nodes)} | Total Bus Duration: {total_exec:.3f} ms | "
-        f"Total Minor Cycles Required: {len(cycle_summaries)}"
+        f"Unique Messages: {len(nodes)} | Scheduled Executions: {len(schedule_ordered_list)} | "
+        f"Total Bus Time: {total_exec:.3f} ms | Cycles: {len(cycle_summaries)}"
     )
     tree_lines.append("=" * 116)
 

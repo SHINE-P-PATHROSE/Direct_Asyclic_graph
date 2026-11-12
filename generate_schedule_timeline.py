@@ -21,54 +21,91 @@ TYPE_COLORS = {
 }
 
 
-def _validate_schedule(graph, timeline, cycle_duration):
-    """Reject schedules that omit tasks, violate dependencies, or overflow cycles."""
-    if len(timeline) != len(graph.nodes):
-        raise ValueError(
-            f"Schedule contains {len(timeline)} tasks, expected {len(graph.nodes)}."
+def _validate_schedule(
+    graph,
+    timeline,
+    cycle_duration,
+    horizon_cycles,
+    max_tasks_per_cycle,
+):
+    """Reject periodic schedules that exceed cycle limits or violate dependencies."""
+    by_instance = {}
+    cycle_counts = {}
+    cycle_loads = {}
+    for item in timeline:
+        key = (item["sl_no"], item["occurrence"])
+        if key in by_instance:
+            raise ValueError(f"Schedule contains duplicate execution {key}.")
+        by_instance[key] = item
+        cycle_counts[item["cycle"]] = cycle_counts.get(item["cycle"], 0) + 1
+        cycle_loads[item["cycle"]] = (
+            cycle_loads.get(item["cycle"], 0.0) + item["cycletime"]
         )
 
-    by_id = {item["sl_no"]: item for item in timeline}
-    if len(by_id) != len(graph.nodes):
-        raise ValueError("Schedule contains duplicate or missing message IDs.")
+    if any(cycle < 1 or cycle > horizon_cycles for cycle in cycle_counts):
+        raise ValueError("Schedule contains a cycle outside the configured frame.")
+    if any(count > max_tasks_per_cycle for count in cycle_counts.values()):
+        raise ValueError(
+            f"Schedule exceeds the {max_tasks_per_cycle}-task per-cycle limit."
+        )
+    if any(load > cycle_duration + 1e-9 for load in cycle_loads.values()):
+        raise ValueError("Schedule exceeds the configured cycle duration.")
 
     absolute_times = {
-        node_id: (
+        key: (
             (item["cycle"] - 1) * cycle_duration + item["start_time"],
             (item["cycle"] - 1) * cycle_duration + item["end_time"],
         )
-        for node_id, item in by_id.items()
+        for key, item in by_instance.items()
     }
-
     for parent_id, child_id in graph.edges:
-        if absolute_times[parent_id][1] > absolute_times[child_id][0] + 1e-9:
-            raise ValueError(
-                f"Schedule violates dependency {parent_id} -> {child_id}."
-            )
-
-    for item in timeline:
-        if item["start_time"] < -1e-9 or item["end_time"] > cycle_duration + 1e-9:
-            raise ValueError(
-                f"Message {item['sl_no']} does not fit in cycle {item['cycle']}."
-            )
+        parent_ends = [
+            times[1]
+            for key, times in absolute_times.items()
+            if key[0] == parent_id
+        ]
+        child_starts = [
+            times[0]
+            for key, times in absolute_times.items()
+            if key[0] == child_id
+        ]
+        if any(
+            not any(parent_end <= child_start + 1e-9 for parent_end in parent_ends)
+            for child_start in child_starts
+        ):
+            raise ValueError(f"Schedule violates dependency {parent_id} -> {child_id}.")
 
 
 def generate_schedule_timeline(
     output_path="dag_scheduling_timeline1.png",
     cycle_duration=8.0,
     dpi=220,
+    horizon_cycles=64,
+    max_tasks_per_cycle=20,
 ):
-    """Schedule every message once and save a detailed per-cycle Gantt chart."""
+    """Schedule periodic message executions and save a detailed per-cycle Gantt chart."""
     graph = load_dag()
-    _, timeline = graph.priority_aware_task_schedule(cycle_duration=cycle_duration)
-    _validate_schedule(graph, timeline, cycle_duration)
+    _, timeline = graph.priority_aware_task_schedule(
+        cycle_duration=cycle_duration,
+        horizon_cycles=horizon_cycles,
+        max_tasks_per_cycle=max_tasks_per_cycle,
+    )
+    _validate_schedule(
+        graph,
+        timeline,
+        cycle_duration,
+        horizon_cycles,
+        max_tasks_per_cycle,
+    )
 
     cycles = {}
     for item in timeline:
         cycles.setdefault(item["cycle"], []).append(item)
+    for cycle in range(1, horizon_cycles + 1):
+        cycles.setdefault(cycle, [])
 
     cycle_summaries = []
-    for cycle, items in cycles.items():
+    for cycle, items in sorted(cycles.items()):
         busy_time = sum(item["cycletime"] for item in items)
         cycle_summaries.append(
             {
@@ -80,8 +117,8 @@ def generate_schedule_timeline(
             }
         )
 
-    row_height = 0.23
-    panel_header_height = 0.75
+    row_height = 0.11
+    panel_header_height = 0.32
     figure_height = max(
         10,
         row_height * len(timeline) + panel_header_height * len(cycles) + 2.2,
@@ -99,7 +136,7 @@ def generate_schedule_timeline(
     fig.patch.set_facecolor("#f8fafc")
     fig.suptitle(
         "MIL-STD-1553 Message Scheduling Timeline\n"
-        f"All {len(timeline)} messages | {len(cycles)} cycles | "
+        f"{len(timeline)} executions | {len(cycles)} cycles | "
         f"{sum(item['cycletime'] for item in timeline):.3f} ms total execution | "
         f"{cycle_duration:g} ms minor cycles",
         fontsize=19,
@@ -135,7 +172,7 @@ def generate_schedule_timeline(
         ax.set_yticklabels(
             [
                 f'[{item["sl_no"]:02d}] {item["name"]}   '
-                f'P{item["priority"]} | {item["cycletime"]:.3f} ms | '
+                f'#{item["occurrence"]} P{item["priority"]} | {item["cycletime"]:.3f} ms | '
                 f'{item["start_time"]:.3f}–{item["end_time"]:.3f} ms'
                 for item in items
             ],
@@ -157,7 +194,7 @@ def generate_schedule_timeline(
         ax.spines[["top", "right", "left"]].set_visible(False)
         ax.spines["bottom"].set_color("#94a3b8")
         ax.set_title(
-            f"Cycle {cycle}: {len(items)} messages | "
+            f"Cycle {cycle}: {len(items)} executions | "
             f"busy {summary['busy']:.3f} ms | "
             f"slack {summary['slack']:.3f} ms | "
             f"utilization {summary['utilization']:.1f}%",
@@ -182,7 +219,8 @@ def generate_schedule_timeline(
     fig.text(
         0.5,
         0.003,
-        "Each message is scheduled once; arrows/dependencies are enforced before dispatch. "
+        f"Sampling-based schedule: up to {max_tasks_per_cycle} executions per cycle; "
+        "dependencies are enforced before dispatch. "
         "Computed estimates, not the incomplete planned-cycle entries in the workbook "
         "or a validated MIL-STD-1553 bus simulation.",
         ha="center",
@@ -202,7 +240,7 @@ def generate_schedule_timeline(
 
     total_time = sum(item["cycletime"] for item in timeline)
     print(
-        f"Saved {len(timeline)} scheduled messages across {len(cycles)} cycles "
+        f"Saved {len(timeline)} scheduled executions across {len(cycles)} cycles "
         f"({total_time:.3f} ms total execution) to '{output_path}'"
     )
     return output_path
@@ -224,11 +262,20 @@ def main():
         help="Minor-cycle duration in milliseconds (default: 8)",
     )
     parser.add_argument("--dpi", type=int, default=220, help="PNG resolution (default: 220)")
+    parser.add_argument("--cycles", type=int, default=64, help="Number of minor cycles.")
+    parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=20,
+        help="Maximum executions per minor cycle.",
+    )
     args = parser.parse_args()
     generate_schedule_timeline(
         args.output,
         cycle_duration=args.cycle_ms,
         dpi=args.dpi,
+        horizon_cycles=args.cycles,
+        max_tasks_per_cycle=args.max_tasks,
     )
 
 

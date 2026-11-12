@@ -1,6 +1,7 @@
 """Generate a standalone dependency graph annotated with the 8 ms schedule."""
 
 import argparse
+import math
 import os
 
 import matplotlib
@@ -22,135 +23,111 @@ TYPE_COLORS = {
 }
 
 
-def generate_schedule_tree(output_path="dag_schedule_tree.png", cycle_duration=8.0, dpi=180):
-    """Draw all scheduled messages by minor cycle and connect dependency edges."""
+def generate_schedule_tree(
+    output_path="dag_schedule_tree.png",
+    cycle_duration=8.0,
+    dpi=180,
+    horizon_cycles=64,
+    max_tasks_per_cycle=20,
+):
+    """Draw the periodic schedule as a compact 8-by-8 cycle overview."""
     graph = load_dag()
-    _, timeline = graph.priority_aware_task_schedule(cycle_duration=cycle_duration)
-
-    cycle_tasks = {}
-    schedule_by_id = {}
+    _, timeline = graph.priority_aware_task_schedule(
+        cycle_duration=cycle_duration,
+        horizon_cycles=horizon_cycles,
+        max_tasks_per_cycle=max_tasks_per_cycle,
+    )
+    cycle_tasks = {cycle: [] for cycle in range(1, horizon_cycles + 1)}
     for item in timeline:
-        cycle_tasks.setdefault(item["cycle"], []).append(item)
-        schedule_by_id[item["sl_no"]] = item
+        cycle_tasks[item["cycle"]].append(item)
 
-    max_tasks = max((len(tasks) for tasks in cycle_tasks.values()), default=1)
-    cycle_count = max(cycle_tasks, default=1)
-    column_width = 4.0
-    row_height = 1.15
-    card_width = 3.45
-    card_height = 0.78
-    figure_width = max(12, cycle_count * column_width + 1.5)
-    figure_height = max(8, max_tasks * row_height + 3.0)
-
-    fig, ax = plt.subplots(figsize=(figure_width, figure_height))
+    grid_columns = min(8, horizon_cycles)
+    grid_rows = math.ceil(horizon_cycles / grid_columns)
+    fig, axes = plt.subplots(
+        grid_rows,
+        grid_columns,
+        figsize=(grid_columns * 4.0, grid_rows * 5.0),
+        squeeze=False,
+    )
     fig.patch.set_facecolor("#f8fafc")
-    ax.set_facecolor("#f8fafc")
-    ax.set_title(
-        "MIL-STD-1553 Scheduled Message Dependency DAG\n"
-        f"Priority-aware serial schedule, {cycle_duration:g} ms per minor cycle",
-        fontsize=17,
+    fig.suptitle(
+        "MIL-STD-1553 Periodic Message Schedule\n"
+        f"{horizon_cycles} cycles | {cycle_duration:g} ms per cycle | "
+        f"maximum {max_tasks_per_cycle} executions per cycle",
+        fontsize=18,
         fontweight="bold",
         color="#0f172a",
-        pad=22,
+        y=0.995,
     )
 
-    positions = {}
-    for cycle, tasks in sorted(cycle_tasks.items()):
-        x = (cycle - 1) * column_width
-        ax.axvspan(
-            x - column_width / 2,
-            x + column_width / 2,
-            color="#eff6ff" if cycle % 2 else "#f1f5f9",
-            zorder=0,
-        )
-        ax.text(
-            x,
-            1.05,
-            f"MINOR CYCLE {cycle}",
-            ha="center",
-            va="center",
-            fontsize=10,
+    for cycle in range(1, grid_rows * grid_columns + 1):
+        ax = axes[(cycle - 1) // grid_columns][(cycle - 1) % grid_columns]
+        ax.set_facecolor("#ffffff")
+        if cycle > horizon_cycles:
+            ax.axis("off")
+            continue
+        tasks = cycle_tasks[cycle]
+        busy = sum(item["cycletime"] for item in tasks)
+        ax.set_title(
+            f"Cycle {cycle}: {len(tasks)} tasks, {busy:.2f}/{cycle_duration:g} ms",
+            fontsize=9,
             fontweight="bold",
-            color="#334155",
+            color="#0f172a",
         )
-
+        ax.set_xlim(0, 1)
+        ax.set_ylim(max_tasks_per_cycle, 0)
+        ax.set_xticks([])
+        ax.set_yticks([])
         for row, item in enumerate(tasks):
-            node_id = item["sl_no"]
-            y = -row * row_height
-            positions[node_id] = (x, y)
-            node = graph.nodes[node_id]
+            node = graph.nodes[item["sl_no"]]
             color = TYPE_COLORS.get(node.type, "#64748b")
+            parents = ",".join(map(str, sorted(graph.in_edges[item["sl_no"]]))) or "root"
             card = FancyBboxPatch(
-                (x - card_width / 2, y - card_height / 2),
-                card_width,
-                card_height,
-                boxstyle="round,pad=0.025,rounding_size=0.08",
+                (0.02, row + 0.08),
+                0.96,
+                0.82,
+                boxstyle="round,pad=0.015,rounding_size=0.04",
                 facecolor="#ffffff",
                 edgecolor=color,
-                linewidth=1.6,
-                zorder=3,
+                linewidth=1.1,
             )
             ax.add_patch(card)
             ax.text(
-                x,
-                y,
-                f"[{node_id:02d}] {node.name}\n"
-                f"{node.type} | Priority {node.priority} | {item['cycletime']:.3f} ms\n"
-                f"{item['start_time']:.3f}–{item['end_time']:.3f} ms",
-                ha="center",
+                0.05,
+                row + 0.49,
+                f'[{item["sl_no"]:02d}] #{item["occurrence"]} {node.name} '
+                f'({item["start_time"]:.2f}-{item["end_time"]:.2f} ms; '
+                f'parents: {parents})',
+                ha="left",
                 va="center",
-                fontsize=6.8,
+                fontsize=5.1,
                 color="#0f172a",
-                zorder=4,
+                clip_on=True,
             )
-
-    for parent_id, child_id in sorted(graph.edges):
-        parent = schedule_by_id[parent_id]
-        child = schedule_by_id[child_id]
-        parent_position = positions[parent_id]
-        child_position = positions[child_id]
-        ax.annotate(
-            "",
-            xy=child_position,
-            xytext=parent_position,
-            arrowprops={
-                "arrowstyle": "-|>",
-                "color": "#64748b",
-                "linewidth": 0.9,
-                "alpha": 0.75,
-                "shrinkA": 30,
-                "shrinkB": 30,
-                "connectionstyle": "arc3,rad=0.06",
-            },
-            zorder=2,
-        )
+        ax.spines[["top", "right", "left", "bottom"]].set_color("#cbd5e1")
 
     legend_handles = [
         mpatches.Patch(facecolor="#ffffff", edgecolor=color, label=message_type)
         for message_type, color in TYPE_COLORS.items()
     ]
-    ax.legend(
+    fig.legend(
         handles=legend_handles,
         title="Message type",
-        loc="upper right",
-        frameon=True,
+        loc="lower center",
+        ncol=len(legend_handles),
+        frameon=False,
         fontsize=8,
     )
-    ax.text(
-        0.01,
-        -0.035,
-        "Arrow: prerequisite → dependent. Times are an analytical serial schedule, not a validated bus simulation.",
-        transform=ax.transAxes,
+    fig.text(
+        0.5,
+        0.008,
+        "Sampling-based schedule; listed parent IDs are prerequisites. "
+        "Analytical estimate, not a validated bus simulation.",
+        ha="center",
         fontsize=8,
         color="#475569",
-        ha="left",
-        va="top",
     )
-
-    ax.set_xlim(-column_width / 2 - 0.2, (cycle_count - 1) * column_width + column_width / 2 + 0.2)
-    ax.set_ylim(-(max_tasks - 1) * row_height - 0.9, 1.5)
-    ax.axis("off")
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.01, 0.03, 0.99, 0.98))
 
     output_path = os.path.abspath(output_path)
     output_dir = os.path.dirname(output_path)
@@ -158,7 +135,10 @@ def generate_schedule_tree(output_path="dag_schedule_tree.png", cycle_duration=8
         os.makedirs(output_dir, exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved scheduled dependency graph for {len(graph.nodes)} messages to '{output_path}'")
+    print(
+        f"Saved {len(timeline)} scheduled executions across "
+        f"{horizon_cycles} cycles to '{output_path}'"
+    )
     return output_path
 
 
@@ -183,8 +163,21 @@ def main():
         default=180,
         help="PNG resolution in DPI (default: 180)",
     )
+    parser.add_argument("--cycles", type=int, default=64, help="Number of minor cycles.")
+    parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=20,
+        help="Maximum executions per minor cycle.",
+    )
     args = parser.parse_args()
-    generate_schedule_tree(args.output, cycle_duration=args.cycle_ms, dpi=args.dpi)
+    generate_schedule_tree(
+        args.output,
+        cycle_duration=args.cycle_ms,
+        dpi=args.dpi,
+        horizon_cycles=args.cycles,
+        max_tasks_per_cycle=args.max_tasks,
+    )
 
 
 if __name__ == "__main__":

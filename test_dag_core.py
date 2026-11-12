@@ -104,6 +104,90 @@ class SchedulingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds the cycle duration"):
             graph.priority_aware_task_schedule(cycle_duration=8)
 
+    def test_periodic_schedule_repeats_by_sampling_and_balances_64_cycles(self):
+        graph = DirectedAcyclicGraph()
+        graph.add_node(
+            MessageNode(
+                1,
+                "fast",
+                sampling=16,
+                cycletime=0.5,
+            )
+        )
+        graph.add_node(
+            MessageNode(
+                2,
+                "dependent",
+                sampling=32,
+                priority=2,
+                parent_raw="1",
+                cycletime=0.5,
+            )
+        )
+        graph.parse_parents()
+
+        _, timeline = graph.priority_aware_task_schedule(
+            cycle_duration=8,
+            horizon_cycles=64,
+            max_tasks_per_cycle=20,
+        )
+        by_id = {}
+        for item in timeline:
+            by_id.setdefault(item["sl_no"], []).append(item)
+
+        self.assertEqual(len(by_id[1]), 32)
+        self.assertEqual(len(by_id[2]), 16)
+        self.assertLessEqual(max(item["cycle"] for item in timeline), 64)
+        for child in by_id[2]:
+            self.assertTrue(
+                any(
+                    parent["cycle"] < child["cycle"]
+                    or (
+                        parent["cycle"] == child["cycle"]
+                        and parent["end_time"] <= child["start_time"]
+                    )
+                    for parent in by_id[1]
+                )
+            )
+
+    def test_periodic_dataset_schedule_has_64_cycles_and_respects_limits(self):
+        graph = load_dag()
+        _, timeline = graph.priority_aware_task_schedule(
+            cycle_duration=8,
+            horizon_cycles=64,
+            max_tasks_per_cycle=20,
+        )
+        task_counts = {
+            cycle: sum(item["cycle"] == cycle for item in timeline)
+            for cycle in range(1, 65)
+        }
+        cycle_loads = {
+            cycle: sum(
+                item["cycletime"] for item in timeline if item["cycle"] == cycle
+            )
+            for cycle in range(1, 65)
+        }
+        self.assertEqual(len(task_counts), 64)
+        self.assertLessEqual(max(task_counts.values()), 20)
+        self.assertGreater(min(task_counts.values()), 0)
+        self.assertLessEqual(max(task_counts.values()) - min(task_counts.values()), 3)
+        self.assertLessEqual(max(cycle_loads.values()) - min(cycle_loads.values()), 2.1)
+        self.assertEqual(len(timeline), 575)
+        executions_by_id = {}
+        for item in timeline:
+            executions_by_id.setdefault(item["sl_no"], []).append(item)
+        for parent_id, child_id in graph.edges:
+            parent_ends = [
+                (item["cycle"] - 1) * 8 + item["end_time"]
+                for item in executions_by_id[parent_id]
+            ]
+            for child in executions_by_id[child_id]:
+                child_start = (child["cycle"] - 1) * 8 + child["start_time"]
+                self.assertTrue(
+                    any(parent_end <= child_start + 1e-9 for parent_end in parent_ends),
+                    f"Dependency {parent_id}->{child_id} is violated.",
+                )
+
     def test_all_loaded_dataset_nodes_are_scheduled_in_topological_order(self):
         graph = load_dag()
         order, timeline = graph.priority_aware_task_schedule()
@@ -122,8 +206,9 @@ class SchedulingTests(unittest.TestCase):
         )
 
         self.assertEqual(len(schedule), len(graph.nodes))
-        self.assertEqual(len(ordered), len(graph.nodes))
-        self.assertEqual(sum(item["task_count"] for item in summaries), len(graph.nodes))
+        self.assertEqual(len(ordered), 575)
+        self.assertEqual(len(summaries), 64)
+        self.assertEqual(sum(item["task_count"] for item in summaries), len(ordered))
         self.assertEqual(in_degree[39], len(in_edges[39]))
         for parent_id, child_id in graph.edges:
             parent = schedule[parent_id]
@@ -218,6 +303,35 @@ class GeneratedTreeTests(unittest.TestCase):
 
         self.assertTrue(set(graph.nodes).issubset(text_ids))
         self.assertEqual(html_node_count, len(graph.nodes))
+
+    def test_schedule_workbook_contains_all_repeated_executions_and_cycles(self):
+        import generate_perfect_trees
+        import openpyxl
+
+        graph = load_dag()
+        nodes, adj, in_edges, in_degree = to_visualization_data(graph)
+        original_dir = os.getcwd()
+        with tempfile.TemporaryDirectory() as output_dir:
+            try:
+                os.chdir(output_dir)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    generate_perfect_trees.generate_tree_excel(
+                        nodes, adj, in_edges, in_degree
+                    )
+                workbook = openpyxl.load_workbook("dag_tree_structure.xlsx", data_only=True)
+            finally:
+                os.chdir(original_dir)
+
+        schedule = workbook["Execution Schedule"]
+        summary = workbook["Cycle Summary"]
+        self.assertEqual(schedule.max_row - 4, 575)
+        self.assertEqual(schedule.max_column, 12)
+        self.assertEqual(summary.max_row - 3, 64)
+        self.assertEqual(
+            sum(summary.cell(row=row, column=2).value for row in range(4, 68)),
+            575,
+        )
+        workbook.close()
 
     def test_schedule_graph_generates_a_standalone_image(self):
         import generate_schedule_tree

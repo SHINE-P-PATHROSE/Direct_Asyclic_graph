@@ -711,7 +711,11 @@ def generate_clean_scheduling_timeline():
     DPI=300 for crisp rendering.
     """
     graph = load_dag()
-    _, scheduled = graph.priority_aware_task_schedule()
+    _, scheduled = graph.priority_aware_task_schedule(
+        cycle_duration=8.0,
+        horizon_cycles=64,
+        max_tasks_per_cycle=20,
+    )
     timeline = [
         {
             "sl_no": item["sl_no"],
@@ -719,8 +723,10 @@ def generate_clean_scheduling_timeline():
             "type": item["type"],
             "priority": item["priority"],
             "duration": item["cycletime"],
-            "start_time": item["start_time"],
-            "end_time": item["end_time"],
+            "start_time": (item["cycle"] - 1) * 8.0 + item["start_time"],
+            "end_time": (item["cycle"] - 1) * 8.0 + item["end_time"],
+            "cycle": item["cycle"],
+            "occurrence": item["occurrence"],
         }
         for item in scheduled
     ]
@@ -752,7 +758,10 @@ def generate_clean_scheduling_timeline():
                 fontsize=8.0, fontweight="bold", zorder=4)
 
     ax.set_yticks(y_pos)
-    ax.set_yticklabels([f"[{t['sl_no']:02d}] {t['name']}  (Prio {t['priority']})" for t in first_tasks],
+    ax.set_yticklabels([
+        f"[{t['sl_no']:02d}] {t['name']}  (Cycle {t['cycle']}, run {t['occurrence']}, Prio {t['priority']})"
+        for t in first_tasks
+    ],
                        fontsize=10.0, fontweight="bold", color="#1e293b")
     ax.invert_yaxis()
     ax.set_xlabel("Timeline Duration (milliseconds)", fontsize=13, fontweight="bold", color="#0f172a", labelpad=12)
@@ -778,8 +787,16 @@ def generate_clean_scheduling_timeline():
 
 
 def compute_priority_schedule(nodes, adj, in_edges, in_degree, total_cycle_time=8.000):
-    """Schedule tasks through the shared DAG scheduler and pack them into cycles."""
-    return schedule_cycle_data(nodes, adj, in_edges, in_degree, total_cycle_time)
+    """Schedule periodic tasks through the shared 64-cycle scheduler."""
+    return schedule_cycle_data(
+        nodes,
+        adj,
+        in_edges,
+        in_degree,
+        total_cycle_time,
+        horizon_cycles=64,
+        max_tasks_per_cycle=20,
+    )
 
 
 def generate_text_tree(nodes, adj, in_edges, in_degree):
@@ -789,11 +806,17 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
     schedule_by_id, schedule_ordered_list, cycle_summaries = compute_priority_schedule(
         nodes, adj, in_edges, in_degree, TOTAL_CYCLE_TIME
     )
+    occurrence_counts = {}
+    for item in schedule_ordered_list:
+        occurrence_counts[item["id"]] = occurrence_counts.get(item["id"], 0) + 1
 
     tree_lines = []
     tree_lines.append("=" * 116)
     tree_lines.append("MIL-STD-1553 BUS HIERARCHICAL TASK DEPENDENCY TREE & FRAME SCHEDULE")
-    tree_lines.append(f"Bus Minor Cycle Duration: {TOTAL_CYCLE_TIME:.3f} ms | Priority-Aware Topological Precedence Schedule")
+    tree_lines.append(
+        f"64 minor cycles at {TOTAL_CYCLE_TIME:.3f} ms each | "
+        "Sampling-based periodic schedule with precedence constraints"
+    )
     tree_lines.append("=" * 116)
     tree_lines.append("[00] 1553 Bus Controller (Master Frame Schedule Root)")
 
@@ -813,7 +836,8 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
         node_str = (
             f"[{u:02d}] {n['name']} "
             f"({n['type']}, "
-            f"Cycle {sch['cycle']} [{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
+            f"{occurrence_counts[u]} executions per frame, first in Cycle {sch['cycle']} "
+            f"[{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
             f"Margin Left: {sch['time_left']:.3f} ms, "
             f"Prio {n['priority']})"
         )
@@ -835,7 +859,8 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
                     next_prefix
                     + ("\\-- " if child_is_last else "|-- ")
                     + f"[{child:02d}] {nodes[child]['name']} "
-                    + f"[DAG Convergence Link; scheduled in Cycle {c_sch['cycle']} at {c_sch['start_time']:.3f}-{c_sch['end_time']:.3f} ms]"
+                    + f"[DAG Convergence Link; {occurrence_counts[child]} executions per frame, "
+                    + f"first in Cycle {c_sch['cycle']}]"
                 )
             else:
                 build_tree_text(
@@ -866,13 +891,14 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
         tree_lines.append(
             f"  * [{nid:02d}] {n['name']} "
             f"({n['type']}, "
-            f"Cycle {sch['cycle']} [{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
+            f"{occurrence_counts[nid]} executions per frame, first in Cycle {sch['cycle']} "
+            f"[{sch['start_time']:.3f}-{sch['end_time']:.3f} ms], "
             f"Margin Left: {sch['time_left']:.3f} ms, "
             f"Prio {n['priority']})"
         )
 
     tree_lines.append("\n" + "=" * 116)
-    tree_lines.append("SCHEDULE SUMMARY ACROSS MINOR CYCLES (8.000 ms each):")
+    tree_lines.append("SCHEDULE SUMMARY ACROSS 64 MINOR CYCLES (8.000 ms each):")
     tree_lines.append("-" * 116)
     for cs in cycle_summaries:
         tree_lines.append(
@@ -884,8 +910,8 @@ def generate_text_tree(nodes, adj, in_edges, in_degree):
     total_exec = sum(cs['used_time'] for cs in cycle_summaries)
     tree_lines.append("-" * 116)
     tree_lines.append(
-        f"Total Messages: {len(nodes)} | Total Bus Duration: {total_exec:.3f} ms | "
-        f"Total Minor Cycles Required: {len(cycle_summaries)}"
+        f"Unique Messages: {len(nodes)} | Scheduled Executions: {len(schedule_ordered_list)} | "
+        f"Total Bus Time: {total_exec:.3f} ms | Cycles: {len(cycle_summaries)}"
     )
     tree_lines.append("=" * 116)
 
@@ -982,7 +1008,7 @@ for (const button of document.querySelectorAll(".node")) {{
 
 
 def generate_tree_excel(nodes, adj, in_edges, in_degree):
-    """Generate a multi-sheet workbook for the serial 8 ms cycle schedule."""
+    """Generate a workbook with periodic executions and per-cycle load summaries."""
 
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -1012,14 +1038,14 @@ def generate_tree_excel(nodes, adj, in_edges, in_degree):
     bold_font = Font(bold=True)
     thin_gray = Side(style="thin", color="CBD5E1")
 
-    ws_sched.merge_cells("A1:K1")
+    ws_sched.merge_cells("A1:L1")
     ws_sched["A1"] = "MIL-STD-1553 BUS — CHRONOLOGICAL TASK EXECUTION SCHEDULE"
     ws_sched["A1"].font = title_font
     ws_sched["A1"].fill = title_fill
     ws_sched["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws_sched.row_dimensions[1].height = 32
 
-    ws_sched.merge_cells("A2:K2")
+    ws_sched.merge_cells("A2:L2")
     ws_sched["A2"] = (
         f"Minor Cycle Duration: {TOTAL_CYCLE_TIME:.3f} ms | "
         "Topological Priority-Aware Scheduling (Parents finish before Children)"
@@ -1028,7 +1054,7 @@ def generate_tree_excel(nodes, adj, in_edges, in_degree):
     ws_sched["A2"].alignment = Alignment(horizontal="center")
 
     headers_sched = [
-        "Seq", "Node ID", "Message Name", "Message Type", "Cycle No.",
+        "Seq", "Node ID", "Occurrence", "Message Name", "Message Type", "Cycle No.",
         "Start Time (ms)", "End Time (ms)", "Duration (ms)", "Margin Left (ms)",
         "Priority", "Parent Node(s)"
     ]
@@ -1046,6 +1072,7 @@ def generate_tree_excel(nodes, adj, in_edges, in_degree):
         values = [
             item['seq'],
             nid,
+            item['occurrence'],
             item['name'],
             item['type'],
             f"Cycle {item['cycle']}",
@@ -1062,16 +1089,16 @@ def generate_tree_excel(nodes, adj, in_edges, in_degree):
             cell.border = Border(bottom=thin_gray)
             cell.alignment = Alignment(
                 vertical="center",
-                horizontal="left" if col in (3, 4, 11) else "center"
+                horizontal="left" if col in (4, 5, 12) else "center"
             )
             if row_idx % 2 == 0:
                 cell.fill = normal_fill
 
-        ws_sched.cell(row=row_idx, column=6).number_format = "0.000"
         ws_sched.cell(row=row_idx, column=7).number_format = "0.000"
         ws_sched.cell(row=row_idx, column=8).number_format = "0.000"
         ws_sched.cell(row=row_idx, column=9).number_format = "0.000"
-        ws_sched.cell(row=row_idx, column=9).fill = remaining_fill
+        ws_sched.cell(row=row_idx, column=10).number_format = "0.000"
+        ws_sched.cell(row=row_idx, column=10).fill = remaining_fill
 
         if in_degree[nid] == 0:
             for col in range(1, len(headers_sched) + 1):
@@ -1079,13 +1106,13 @@ def generate_tree_excel(nodes, adj, in_edges, in_degree):
                 ws_sched.cell(row=row_idx, column=col).font = bold_font
 
     last_row_sched = header_row + len(schedule_ordered_list)
-    tab_sched = Table(displayName="ScheduleTable", ref=f"A{header_row}:K{last_row_sched}")
+    tab_sched = Table(displayName="ScheduleTable", ref=f"A{header_row}:L{last_row_sched}")
     tab_sched.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
     ws_sched.add_table(tab_sched)
 
     sched_widths = {
-        "A": 8, "B": 11, "C": 36, "D": 15, "E": 14,
-        "F": 16, "G": 16, "H": 15, "I": 18, "J": 11, "K": 26
+        "A": 8, "B": 11, "C": 12, "D": 36, "E": 15, "F": 14,
+        "G": 16, "H": 16, "I": 15, "J": 18, "K": 11, "L": 26
     }
     for col_letter, w in sched_widths.items():
         ws_sched.column_dimensions[col_letter].width = w
@@ -1174,10 +1201,7 @@ def main():
     # 6. Text Tree
     generate_text_tree(nodes, adj, in_edges, in_degree)
 
-    # 7. Interactive HTML tree
-    generate_interactive_html(nodes, adj, in_degree)
-
-    # 8. Excel DAG Tree & Multi-Cycle Schedule
+    # 7. Excel DAG Tree & Multi-Cycle Schedule
     generate_tree_excel(nodes, adj, in_edges, in_degree)
 
     print("=" * 80)
